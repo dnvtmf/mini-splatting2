@@ -13,4 +13,8 @@ screenshots
 *.png
 *.ply
 *.mat
-
+.idea/
+*.so
+diff_gaussian_rasterization
+diff_gaussian_rasterization_ms
+fused_ssim

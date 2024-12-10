@@ -13,11 +13,13 @@ from argparse import ArgumentParser, Namespace
 import sys
 import os
 
+
 class GroupParams:
     pass
 
+
 class ParamGroup:
-    def __init__(self, parser: ArgumentParser, name : str, fill_none = False):
+    def __init__(self, parser: ArgumentParser, name: str, fill_none=False):
         group = parser.add_argument_group(name)
         for key, value in vars(self).items():
             shorthand = False
@@ -25,7 +27,7 @@ class ParamGroup:
                 shorthand = True
                 key = key[1:]
             t = type(value)
-            value = value if not fill_none else None 
+            value = value if not fill_none else None
             if shorthand:
                 if t == bool:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
@@ -44,7 +46,8 @@ class ParamGroup:
                 setattr(group, arg[0], arg[1])
         return group
 
-class ModelParams(ParamGroup): 
+
+class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self._source_path = ""
@@ -55,6 +58,7 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.llff = 8
+        self.is_blender = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -62,12 +66,14 @@ class ModelParams(ParamGroup):
         g.source_path = os.path.abspath(g.source_path)
         return g
 
+
 class PipelineParams(ParamGroup):
     def __init__(self, parser):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
         super().__init__(parser, "Pipeline Parameters")
+
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
@@ -78,7 +84,7 @@ class OptimizationParams(ParamGroup):
         self.position_lr_max_steps = 30_000
         self.feature_lr = 0.0025
         # self.opacity_lr = 0.05
-        self.opacity_lr = 0.05/2
+        self.opacity_lr = 0.05 / 2
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
@@ -89,9 +95,13 @@ class OptimizationParams(ParamGroup):
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
         self.random_background = False
+
+        self.deform_lr_max_steps = 40_000
+        self.warm_up = 3_000
         super().__init__(parser, "Optimization Parameters")
 
-def get_combined_args(parser : ArgumentParser):
+
+def get_combined_args(parser: ArgumentParser):
     cmdlne_string = sys.argv[1:]
     cfgfile_string = "Namespace()"
     args_cmdline = parser.parse_args(cmdlne_string)
@@ -108,14 +118,13 @@ def get_combined_args(parser : ArgumentParser):
     args_cfgfile = eval(cfgfile_string)
 
     merged_dict = vars(args_cfgfile).copy()
-    for k,v in vars(args_cmdline).items():
+    for k, v in vars(args_cmdline).items():
         if v != None:
             merged_dict[k] = v
     return Namespace(**merged_dict)
 
 
-
-def read_config(parser : ArgumentParser):
+def read_config(parser: ArgumentParser):
     cmdlne_string = sys.argv[1:]
     cfgfile_string = "Namespace()"
     args_cmdline = parser.parse_args(cmdlne_string)
@@ -132,7 +141,7 @@ def read_config(parser : ArgumentParser):
     args_cfgfile = eval(cfgfile_string)
 
     merged_dict = vars(args_cmdline).copy()
-    for k,v in vars(args_cfgfile).items():
+    for k, v in vars(args_cfgfile).items():
         if k not in merged_dict:
             merged_dict[k] = v
         else:
