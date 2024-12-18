@@ -18,3 +18,7 @@ screenshots
 diff_gaussian_rasterization
 diff_gaussian_rasterization_ms
 fused_ssim
+simple_knn
+/NeRF
+/extension
+outputs
