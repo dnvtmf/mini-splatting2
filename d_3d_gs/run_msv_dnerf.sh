@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
+cd $(
+  cd $(dirname $0)
+  pwd
+)
 scenes=(bouncingballs hellwarrior hook jumpingjacks lego mutant standup trex)
 gpus=(0 1 2 3 4 5 6 7)
 args=()
 test_args=()
 num_scenes=${#scenes[@]}
 num_gpus=${#gpus[@]}
-out_dir="D_3DGS"
+out_dir="D_3DGS_MSV"
 echo "There are ${num_gpus} gpus and ${num_scenes} scenes"
 
 for ((i = 0; i < ${num_gpus}; ++i)); do
@@ -25,8 +29,8 @@ for ((i = 0; i < num_scenes; ++i)); do
   echo "use gpu${gpu_id} on scene: ${scenes[i]} "
   screen -S gpu${gpu_id} -p 0 -X stuff "^M"
   screen -S gpu${gpu_id} -p 0 -X stuff \
-    "python3 d_3d_gs/train.py -s ~/data/NeRF/D_NeRF/${scenes[i]} -m outputs/${out_dir}/${scenes[i]} \
-      --eval --is_blender ${args[*]} ^M"
+    "python3 d_3d_gs/msv_train.py -m outputs/${out_dir}/${scenes[i]} -s ~/data/NeRF/D_NeRF/${scenes[i]} \
+      --eval --is_blender --config_path config/fast_deform ${args[*]} ^M"
   screen -S gpu${gpu_id} -p 0 -X stuff \
     "python3 d_3d_gs/render.py -m outputs/${out_dir}/${scenes[i]} -s ~/data/NeRF/D_NeRF/${scenes[i]} \
       --eval --is_blender --skip_train --is_blender ${test_args[*]} ^M"

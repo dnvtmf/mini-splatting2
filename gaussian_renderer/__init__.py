@@ -107,7 +107,7 @@ def render(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, sc
 
 
 def render_imp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, scaling_modifier=1.0,
-               override_color=None, flag_max_count=True, culling=None):
+               override_color=None, flag_max_count=True, culling=None, d_xyz=0., d_rotation=0., d_scaling=0.):
     """
     Render the scene. 
     
@@ -143,7 +143,7 @@ def render_imp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz
+    means3D = pc.get_xyz + d_xyz
     means2D = screenspace_points
     opacity = pc.get_opacity
 
@@ -155,8 +155,8 @@ def render_imp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
-        scales = pc.get_scaling
-        rotations = pc.get_rotation
+        scales = pc.get_scaling + d_scaling
+        rotations = pc.get_rotation + d_rotation
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -174,7 +174,7 @@ def render_imp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor
     else:
         colors_precomp = override_color
 
-    if culling == None:
+    if culling is None:
         culling = torch.zeros(means3D.shape[0], dtype=torch.bool, device='cuda')
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
@@ -202,7 +202,7 @@ def render_imp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor
 
 
 def render_simp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, scaling_modifier=1.0,
-                override_color=None, culling=None):
+                override_color=None, culling=None, d_xyz=0., d_rotation=0., d_scaling=0.):
     """
     Render the scene. 
     
@@ -238,7 +238,7 @@ def render_simp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tenso
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz
+    means3D = pc.get_xyz + d_xyz
     means2D = screenspace_points
     opacity = pc.get_opacity
 
@@ -250,8 +250,8 @@ def render_simp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tenso
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
-        scales = pc.get_scaling
-        rotations = pc.get_rotation
+        scales = pc.get_scaling + d_scaling
+        rotations = pc.get_rotation + d_rotation
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -269,12 +269,11 @@ def render_simp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tenso
     else:
         colors_precomp = override_color
 
-    if culling == None:
+    if culling is None:
         culling = torch.zeros(means3D.shape[0], dtype=torch.bool, device='cuda')
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii, \
-        accum_weights_ptr, accum_weights_count, accum_max_count = rasterizer.render_simp(
+    rendered_image, radii, accum_weights_ptr, accum_weights_count, accum_max_count = rasterizer.render_simp(
         means3D=means3D,
         means2D=means2D,
         dc=dc,
@@ -284,22 +283,24 @@ def render_simp(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tenso
         opacities=opacity,
         scales=scales,
         rotations=rotations,
-        cov3D_precomp=cov3D_precomp)
+        cov3D_precomp=cov3D_precomp
+    )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    return {"render": rendered_image,
-            "viewspace_points": screenspace_points,
-            "visibility_filter": (radii > 0).nonzero(),
-            "radii": radii,
-            "accum_weights": accum_weights_ptr,
-            "area_proj": accum_weights_count,
-            "area_max": accum_max_count,
-            }
+    return {
+        "render": rendered_image,
+        "viewspace_points": screenspace_points,
+        "visibility_filter": (radii > 0).nonzero(),
+        "radii": radii,
+        "accum_weights": accum_weights_ptr,
+        "area_proj": accum_weights_count,
+        "area_max": accum_max_count,
+    }
 
 
 def render_depth(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tensor, scaling_modifier=1.0,
-                 override_color=None, culling=None):
+                 override_color=None, culling=None, d_xyz=0., d_rotation=0., d_scaling=0.):
     """
     Render the scene. 
     
@@ -335,7 +336,7 @@ def render_depth(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tens
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
-    means3D = pc.get_xyz
+    means3D = pc.get_xyz + d_xyz
     means2D = screenspace_points
     opacity = pc.get_opacity
 
@@ -347,8 +348,8 @@ def render_depth(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tens
     if pipe.compute_cov3D_python:
         cov3D_precomp = pc.get_covariance(scaling_modifier)
     else:
-        scales = pc.get_scaling
-        rotations = pc.get_rotation
+        scales = pc.get_scaling + d_scaling
+        rotations = pc.get_rotation + d_rotation
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -366,7 +367,7 @@ def render_depth(viewpoint_camera, pc: GaussianModel, pipe, bg_color: torch.Tens
     else:
         colors_precomp = override_color
 
-    if culling == None:
+    if culling is None:
         culling = torch.zeros(means3D.shape[0], dtype=torch.bool, device='cuda')
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 

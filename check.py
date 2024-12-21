@@ -363,7 +363,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     print('num_depth', gaussians._xyz.shape[0], args.num_depth_factor, num_depth)
 
                     # interesction_preserving for better point cloud reconstruction result at the early stage, not affect rendering quality
-                    p1, r1 = gaussians.interesction_preserving(scene, render_simp, iteration, args, pipe, background)
+                    p1, r1 = gaussians.intersection_preserving(scene, render_simp, iteration, args, pipe, background)
                     pts, rgb = gaussians.depth_reinit(scene, render_depth, iteration, num_depth, args, pipe, background)
 
                     gaussians.reinitial_pts(pts, rgb)
@@ -426,7 +426,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             model.hook_after_train_step()
             if iteration == args.simp_iteration1:
-                gaussians.culling_with_interesction_sampling(scene, render_simp, iteration, args, pipe, background)
+                gaussians.culling_with_intersection_sampling(scene, render_simp, iteration, args, pipe, background)
                 gaussians.max_sh_degree = dataset.sh_degree
                 gaussians.extend_features_rest()
 
@@ -436,7 +436,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print(gaussians._xyz.shape)
 
             if iteration == args.simp_iteration2:
-                gaussians.culling_with_interesction_preserving(scene, render_simp, iteration, args, pipe, background)
+                gaussians.culling_with_intersection_preserving(scene, render_simp, iteration, args, pipe, background)
                 torch.cuda.empty_cache()
                 print('culling_with_interesction_preserving offical')
                 # print(gaussians._xyz.shape)

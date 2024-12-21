@@ -9,15 +9,17 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
+
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
-import os
-from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
+from simple_knn._C import distCUDA2  # noqa
+
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from utils.system_utils import mkdir_p
 from utils.sh_utils import RGB2SH
-from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from utils.sh_utils import SH2RGB
@@ -446,9 +448,8 @@ class GaussianModel:
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling,
-                                                        dim=1).values > self.percent_dense * scene_extent)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask, torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device="cuda")
@@ -491,14 +492,13 @@ class GaussianModel:
     def densify_and_split_mask(self, grads, grad_threshold, scene_extent, mask, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
-        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad = torch.zeros((n_init_points,), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling,
-                                                        dim=1).values > self.percent_dense * scene_extent)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask, torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent)
 
-        padded_mask = torch.zeros((n_init_points), dtype=torch.bool, device='cuda')
+        padded_mask = torch.zeros((n_init_points,), dtype=torch.bool, device='cuda')
         padded_mask[:grads.shape[0]] = mask
         selected_pts_mask = torch.logical_or(selected_pts_mask, padded_mask)
 
@@ -554,15 +554,19 @@ class GaussianModel:
         self._culling = torch.zeros((self._xyz.shape[0], num_views), dtype=torch.bool, device='cuda')
         self.factor_culling = torch.ones((self._xyz.shape[0], 1), device='cuda')
 
-    def depth_reinit(self, scene, render_depth, iteration, num_depth, args, pipe, background):
-
+    def depth_reinit(self, scene, render_depth, iteration, num_depth, args, pipe, background, deform=None):
         out_pts_list = []
         gt_list = []
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
         for view in views:
             gt = view.original_image[0:3, :, :]
-
-            render_depth_pkg = render_depth(view, self, pipe, background, culling=self._culling[:, view.uid])
+            if deform is None:
+                d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
+            else:
+                time_input = view.fid.unsqueeze(0).expand(self.get_xyz.shape[0], -1)
+                d_xyz, d_rotation, d_scaling = deform.step(self.get_xyz.detach(), time_input)
+            render_depth_pkg = render_depth(view, self, pipe, background, culling=self._culling[:, view.uid],
+                                            d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
 
             out_pts = render_depth_pkg["out_pts"]
             accum_alpha = render_depth_pkg["accum_alpha"]
@@ -577,8 +581,7 @@ class GaussianModel:
             N_xyz = prob.shape[0]
             num_sampled = int(N_xyz * factor)
 
-            indices = np.random.choice(N_xyz, size=num_sampled,
-                                       p=prob, replace=False)
+            indices = np.random.choice(N_xyz, size=num_sampled, p=prob, replace=False)
 
             out_pts = out_pts.permute(1, 2, 0).reshape(-1, 3)
             gt = gt.permute(1, 2, 0).reshape(-1, 3)
@@ -591,8 +594,7 @@ class GaussianModel:
 
         return out_pts_merged, gt_merged
 
-    def interesction_sampling(self, scene, render_simp, iteration, args, pipe, background):
-
+    def intersection_sampling(self, scene, render_simp, iteration, args, pipe, background):
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
@@ -619,8 +621,7 @@ class GaussianModel:
         factor = args.sampling_factor
         N_xyz = self._xyz.shape[0]
         num_sampled = int(N_xyz * factor * ((prob != 0).sum() / prob.shape[0]))
-        indices = np.random.choice(N_xyz, size=num_sampled,
-                                   p=prob, replace=False)
+        indices = np.random.choice(N_xyz, size=num_sampled, p=prob, replace=False)
 
         mask = np.zeros(N_xyz, dtype=bool)
         mask[indices] = True
@@ -629,13 +630,18 @@ class GaussianModel:
 
         return self._xyz, SH2RGB(self._features_dc + 0)[:, 0]
 
-    def interesction_preserving(self, scene, render_simp, iteration, args, pipe, background):
-
+    def intersection_preserving(self, scene, render_simp, iteration, args, pipe, background, deform=None):
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
         for view in views:
-            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid])
+            if deform is None:
+                d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
+            else:
+                time_input = view.fid.unsqueeze(0).expand(self.get_xyz.shape[0], -1)
+                d_xyz, d_rotation, d_scaling = deform.step(self.get_xyz.detach(), time_input)
+            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid],
+                                     d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
 
             accum_weights = render_pkg["accum_weights"]
             area_proj = render_pkg["area_proj"]
@@ -657,7 +663,6 @@ class GaussianModel:
         return self._xyz, SH2RGB(self._features_dc + 0)[:, 0]
 
     def importance_pruning(self, scene, render_simp, iteration, args, pipe, background):
-
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
         for view in views:
@@ -672,7 +677,6 @@ class GaussianModel:
         return self._xyz, SH2RGB(self._features_dc + 0)[:, 0]
 
     def visibility_culling(self, scene, render_simp, iteration, args, pipe, background):
-
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
 
@@ -703,7 +707,6 @@ class GaussianModel:
         self.prune_points(mask)
 
     def aggressive_clone(self, scene, render_simp, iteration, args, pipe, background):
-
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
@@ -727,8 +730,7 @@ class GaussianModel:
         self.clone(intersection_pts_mask)
 
     # aggressive_clone with visibility_culling
-    def culling_with_clone(self, scene, render_simp, iteration, args, pipe, background):
-
+    def culling_with_clone(self, scene, render_simp, iteration, args, pipe, background, deform=None):
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
@@ -740,7 +742,13 @@ class GaussianModel:
 
         for view in views:
             # render_pkg = render_simp(view, self, pipe, background)
-            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid])
+            if deform is None:
+                d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
+            else:
+                time_input = view.fid.unsqueeze(0).expand(self.get_xyz.shape[0], -1)
+                d_xyz, d_rotation, d_scaling = deform.step(self.get_xyz.detach(), time_input)
+            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid],
+                                     d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
 
             accum_weights = render_pkg["accum_weights"]
             area_max = render_pkg["area_max"]
@@ -767,7 +775,6 @@ class GaussianModel:
         self.clone(intersection_pts_mask)
 
     def clone(self, selected_pts_mask):
-
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -794,9 +801,8 @@ class GaussianModel:
         new_factor_culling = self.factor_culling[selected_pts_mask]
         self.factor_culling = torch.cat((self.factor_culling, new_factor_culling))
 
-    # interesction_preserving with visibility_culling
-    def culling_with_interesction_preserving(self, scene, render_simp, iteration, args, pipe, background):
-
+    # intersection_preserving with visibility_culling
+    def culling_with_intersection_preserving(self, scene, render_simp, iteration, args, pipe, background, deform=None):
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
@@ -807,7 +813,13 @@ class GaussianModel:
         count_vis = torch.zeros((self._xyz.shape[0], 1)).cuda()
 
         for view in views:
-            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid])
+            if deform is None:
+                d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
+            else:
+                time_input = view.fid.unsqueeze(0).expand(self.get_xyz.shape[0], -1)
+                d_xyz, d_rotation, d_scaling = deform.step(self.get_xyz.detach(), time_input)
+            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid],
+                                     d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
             accum_weights = render_pkg["accum_weights"]
             area_proj = render_pkg["area_proj"]
             area_max = render_pkg["area_max"]
@@ -837,10 +849,8 @@ class GaussianModel:
         prune_mask = torch.logical_or(prune_mask, non_prune_mask == False)
         self.prune_points(prune_mask)
 
-        # interesction_sampling with visibility_culling
-
-    def culling_with_interesction_sampling(self, scene, render_simp, iteration, args, pipe, background):
-
+    # intersection_sampling with visibility_culling
+    def culling_with_intersection_sampling(self, scene, render_simp, iteration, args, pipe, background, deform=None):
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
@@ -851,7 +861,13 @@ class GaussianModel:
         count_vis = torch.zeros((self._xyz.shape[0], 1)).cuda()
 
         for view in views:
-            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid])
+            if deform is None:
+                d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
+            else:
+                time_input = view.fid.unsqueeze(0).expand(self.get_xyz.shape[0], -1)
+                d_xyz, d_rotation, d_scaling = deform.step(self.get_xyz.detach(), time_input)
+            render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:, view.uid],
+                                     d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
             accum_weights = render_pkg["accum_weights"]
             area_proj = render_pkg["area_proj"]
             area_max = render_pkg["area_max"]
@@ -879,8 +895,7 @@ class GaussianModel:
         factor = args.sampling_factor
         N_xyz = self._xyz.shape[0]
         num_sampled = int(N_xyz * factor * ((prob != 0).sum() / prob.shape[0]))
-        indices = np.random.choice(N_xyz, size=num_sampled,
-                                   p=prob, replace=False)
+        indices = np.random.choice(N_xyz, size=num_sampled, p=prob, replace=False)
 
         non_prune_mask = np.zeros(N_xyz, dtype=bool)
         non_prune_mask[indices] = True
@@ -891,10 +906,8 @@ class GaussianModel:
         prune_mask = torch.logical_or(prune_mask, torch.tensor(non_prune_mask == False, device='cuda'))
         self.prune_points(prune_mask)
 
-        # importance_pruning with visibility_culling
-
+    # importance_pruning with visibility_culling
     def culling_with_importance_pruning(self, scene, render_simp, iteration, args, pipe, background):
-
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
 
@@ -925,6 +938,5 @@ class GaussianModel:
         self.prune_points(prune_mask)
 
     def extend_features_rest(self):
-
         features = torch.zeros((self._xyz.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))

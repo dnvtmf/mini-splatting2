@@ -151,8 +151,8 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
     reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics,
-                                           images_folder=os.path.join(path, reading_dir))
+    cam_infos_unsorted = readColmapCameras(
+        cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
     cam_infos = sorted(cam_infos_unsorted.copy(), key=lambda x: x.image_name)
 
     if eval:
@@ -353,10 +353,8 @@ def readNerfiesCameras(path):
 
         FovY = focal2fov(focal, image.size[1])
         FovX = focal2fov(focal, image.size[0])
-        cam_info = CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=image.size[
-                0], height=image.size[1],
-                              fid=fid)
+        cam_info = CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path,
+                              image_name=image_name, width=image.size[0], height=image.size[1], fid=fid)
         cam_infos.append(cam_info)
 
     sys.stdout.write('\n')
@@ -385,8 +383,7 @@ def readNerfiesInfo(path, eval):
         xyz = (xyz - scene_center) * scene_scale
         num_pts = xyz.shape[0]
         shs = np.random.random((num_pts, 3)) / 255.0
-        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(
-            shs), normals=np.zeros((num_pts, 3)))
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
 
         storePly(ply_path, xyz, SH2RGB(shs) * 255)
     try:
@@ -411,16 +408,13 @@ def readCamerasFromNpy(path, npy_file, split, hold_id, num_images):
     H, W, focal = poses[0, :, -1]
 
     n_cameras = poses.shape[0]
-    poses = np.concatenate(
-        [poses[..., 1:2], -poses[..., :1], poses[..., 2:4]], -1)
-    bottoms = np.array([0, 0, 0, 1]).reshape(
-        1, -1, 4).repeat(poses.shape[0], axis=0)
+    poses = np.concatenate([poses[..., 1:2], -poses[..., :1], poses[..., 2:4]], -1)
+    bottoms = np.array([0, 0, 0, 1]).reshape(1, -1, 4).repeat(poses.shape[0], axis=0)
     poses = np.concatenate([poses, bottoms], axis=1)
     poses = poses @ np.diag([1, -1, -1, 1])
 
     i_test = np.array(hold_id)
-    video_list = i_test if split != 'train' else list(
-        set(np.arange(n_cameras)) - set(i_test))
+    video_list = i_test if split != 'train' else list(set(np.arange(n_cameras)) - set(i_test))
 
     for i in video_list:
         video_path = video_paths[i]
@@ -451,8 +445,8 @@ def readCamerasFromNpy(path, npy_file, split, hold_id, num_images):
 
 def readPlenopticVideoDataset(path, eval, num_images, hold_id=[0]):
     print("Reading Training Camera")
-    train_cam_infos = readCamerasFromNpy(path, 'poses_bounds.npy', split="train", hold_id=hold_id,
-                                         num_images=num_images)
+    train_cam_infos = readCamerasFromNpy(
+        path, 'poses_bounds.npy', split="train", hold_id=hold_id, num_images=num_images)
 
     print("Reading Training Camera")
     test_cam_infos = readCamerasFromNpy(
@@ -471,9 +465,7 @@ def readPlenopticVideoDataset(path, eval, num_images, hold_id=[0]):
         # We create random points inside the bounds of the synthetic Blender scenes
         xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
         shs = np.random.random((num_pts, 3)) / 255.0
-        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(
-            shs), normals=np.zeros((num_pts, 3)))
-
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
         storePly(ply_path, xyz, SH2RGB(shs) * 255)
 
     try:

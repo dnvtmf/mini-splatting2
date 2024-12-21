@@ -153,7 +153,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     num_depth = gaussians._xyz.shape[0] * args.num_depth_factor
 
                     # interesction_preserving for better point cloud reconstruction result at the early stage, not affect rendering quality
-                    gaussians.interesction_preserving(scene, render_simp, iteration, args, pipe, background)
+                    gaussians.intersection_preserving(scene, render_simp, iteration, args, pipe, background)
                     pts, rgb = gaussians.depth_reinit(scene, render_depth, iteration, num_depth, args, pipe, background)
 
                     gaussians.reinitial_pts(pts, rgb)
