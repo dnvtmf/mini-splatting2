@@ -98,6 +98,8 @@ class OptimizationParams(ParamGroup):
 
         self.deform_lr_max_steps = 40_000
         self.warm_up = 3_000
+        self.deform_lr_init = 1e-3
+        self.A_lr_init = 1e-3
         super().__init__(parser, "Optimization Parameters")
 
 

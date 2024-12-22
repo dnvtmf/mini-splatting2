@@ -16,7 +16,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.abspath(os.path.join(BASE_DIR, '..')))
 import torch
 from scene import Scene
-from scene.deform_model import DeformModel
+from scene.sp_gs import DeformModel
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
@@ -30,8 +30,18 @@ import imageio
 import numpy as np
 
 
-def render_set(model_path, name, iteration, views, gaussians, pipeline, background,
-               deform):
+def render_set(
+    model_path,
+    name,
+    iteration,
+    views,
+    gaussians,
+    pipeline,
+    background,
+    deform,
+    fine_deform,
+    no_mlp
+):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth")
@@ -43,21 +53,35 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         fid = view.fid
         xyz = gaussians.get_xyz
-        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
+        time_input = fid.view(-1)  # fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input, use_mlp=not no_mlp)[0]
+        # fd = None if fine_deform is None else fine_deform.step(xyz.detach(), d_xyz, d_rotation, time_input)
         results = render(view, gaussians, pipeline, background, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
         rendering = results["render"]
-        # depth = results["depth"]
-        # depth = depth / (depth.max() + 1e-5)
+        depth = results.get("depth", None)
 
         gt = view.original_image[0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-        # torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
+        # torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name))
+        # torchvision.utils.save_image(gt, os.path.join(gts_path, view.image_name))
+        if depth is not None:
+            depth = depth / (depth.max() + 1e-5)
+            torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 
 
-def interpolate_time(model_path, name, iteration, views, gaussians, pipeline, background,
-                     deform):
+def interpolate_time(
+    model_path,
+    name,
+    iteration,
+    views,
+    gaussians,
+    pipeline,
+    background,
+    deform,
+    fine_deform,
+    no_mlp,
+):
     render_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_{}".format(iteration), "depth")
 
@@ -73,23 +97,33 @@ def interpolate_time(model_path, name, iteration, views, gaussians, pipeline, ba
     for t in tqdm(range(0, frame, 1), desc="Rendering progress"):
         fid = torch.Tensor([t / (frame - 1)]).cuda()
         xyz = gaussians.get_xyz
-        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
+        time_input = fid.view(-1)  # fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input, use_mlp=not no_mlp)[0]
+        fd = None if fine_deform is None else fine_deform.step(xyz.detach(), d_xyz, d_rotation, time_input)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, f_deform=fd)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
-        depth = results["depth"]
-        depth = depth / (depth.max() + 1e-5)
-
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(t) + ".png"))
-        torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(t) + ".png"))
+
+        depth = results["depth"]
+        if depth is not None:
+            depth = depth / (depth.max() + 1e-5)
+            torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(t) + ".png"))
 
     renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_view(model_path, name, iteration, views, gaussians, pipeline, background,
-                     timer):
+def interpolate_view(
+    model_path,
+    name,
+    iteration,
+    views,
+    gaussians,
+    pipeline,
+    background,
+    timer
+):
     render_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "depth")
     # acc_path = os.path.join(model_path, name, "interpolate_view_{}".format(iteration), "acc")
@@ -120,25 +154,36 @@ def interpolate_view(model_path, name, iteration, views, gaussians, pipeline, ba
         view.reset_extrinsic(R, T)
 
         xyz = gaussians.get_xyz
-        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
+        time_input = fid.view(-1)  # fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)[0]
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
-        depth = results["depth"]
-        depth = depth / (depth.max() + 1e-5)
         # acc = results["acc"]
 
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(i) + ".png"))
-        torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(i) + ".png"))
+        depth = results["depth"]
+        if depth is not None:
+            depth = depth / (depth.max() + 1e-5)
+            torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(i) + ".png"))
         # torchvision.utils.save_image(acc, os.path.join(acc_path, '{0:05d}'.format(i) + ".png"))
 
     renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_all(model_path, name, iteration, views, gaussians, pipeline, background,
-                    deform):
+def interpolate_all(
+    model_path,
+    name,
+    iteration,
+    views,
+    gaussians,
+    pipeline,
+    background,
+    deform,
+    fine_deform,
+    no_mlp,
+):
     render_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "depth")
 
@@ -165,23 +210,33 @@ def interpolate_all(model_path, name, iteration, views, gaussians, pipeline, bac
         view.reset_extrinsic(R, T)
 
         xyz = gaussians.get_xyz
-        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
-        results = render(view, gaussians, pipeline, background, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
+        time_input = fid.view(-1)  # fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input, use_mlp=not no_mlp)[0]
+        fd = None if fine_deform is None else fine_deform.step(xyz.detach(), d_xyz, d_rotation, time_input)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling, f_deform=fd)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
-        depth = results["depth"]
-        depth = depth / (depth.max() + 1e-5)
-
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(i) + ".png"))
-        torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(i) + ".png"))
+
+        depth = results["depth"]
+        if depth is not None:
+            depth = depth / (depth.max() + 1e-5)
+            torchvision.utils.save_image(depth, os.path.join(depth_path, '{0:05d}'.format(i) + ".png"))
 
     renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=30, quality=8)
 
 
-def interpolate_poses(model_path, name, iteration, views, gaussians, pipeline, background,
-                      timer):
+def interpolate_poses(
+    model_path,
+    name,
+    iteration,
+    views,
+    gaussians,
+    pipeline,
+    background,
+    timer
+):
     render_path = os.path.join(model_path, name, "interpolate_pose_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_pose_{}".format(iteration), "depth")
 
@@ -213,22 +268,22 @@ def interpolate_poses(model_path, name, iteration, views, gaussians, pipeline, b
         view.reset_extrinsic(R_cur, T_cur)
 
         xyz = gaussians.get_xyz
-        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)
+        time_input = fid.view(-1)  # fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)[0]
 
-        results = render(view, gaussians, pipeline, background, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
-        depth = results["depth"]
-        depth = depth / (depth.max() + 1e-5)
+        # depth = results["depth"]
+        # depth = depth / (depth.max() + 1e-5)
 
     renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=60, quality=8)
 
 
-def interpolate_view_original(model_path, name, iteration, views, gaussians, pipeline,
-                              background,
-                              timer):
+def interpolate_view_original(
+    model_path, name, iteration, views, gaussians, pipeline, background, timer
+):
     render_path = os.path.join(model_path, name, "interpolate_hyper_view_{}".format(iteration), "renders")
     depth_path = os.path.join(model_path, name, "interpolate_hyper_view_{}".format(iteration), "depth")
     # acc_path = os.path.join(model_path, name, "interpolate_all_{}".format(iteration), "acc")
@@ -270,26 +325,39 @@ def interpolate_view_original(model_path, name, iteration, views, gaussians, pip
         view.reset_extrinsic(R_cur, T_cur)
 
         xyz = gaussians.get_xyz
-        time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)
+        time_input = fid.view(-1)  # fid.unsqueeze(0).expand(xyz.shape[0], -1)
+        d_xyz, d_rotation, d_scaling = timer.step(xyz.detach(), time_input)[0]
 
-        results = render(view, gaussians, pipeline, background, d_xyz=d_xyz, d_rotation=d_rotation, d_scaling=d_scaling)
+        results = render(view, gaussians, pipeline, background, d_xyz, d_rotation, d_scaling)
         rendering = results["render"]
         renderings.append(to8b(rendering.cpu().numpy()))
-        depth = results["depth"]
-        depth = depth / (depth.max() + 1e-5)
+        # depth = results["depth"]
+        # depth = depth / (depth.max() + 1e-5)
 
     renderings = np.stack(renderings, 0).transpose(0, 2, 3, 1)
     imageio.mimwrite(os.path.join(render_path, 'video.mp4'), renderings, fps=60, quality=8)
 
 
-def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
-                mode: str):
+def render_sets(
+    dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool,
+    mode: str, no_mlp: bool,
+):
     with torch.no_grad():
+        print(dataset.__dict__)
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
-        deform = DeformModel(dataset.is_blender)
+        deform = DeformModel(
+            # num_superpoints=dataset.num_superpoints,
+            # num_knn=dataset.num_knn,
+            # sp_net_large=dataset.sp_net_large
+        )
         deform.load_weights(dataset.model_path)
+        # if os.path.exists(os.path.join(dataset.model_path, 'fine_deform')):
+        #     fine_deform = NonRigidDeformationModel(small=not dataset.fine_large, is_blender=dataset.is_blender)
+        #     fine_deform.load_weights(dataset.model_path)
+        #     print('Loaded fine_deform model')
+        # else:
+        fine_deform = None
 
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -309,13 +377,11 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
 
         if not skip_train:
             render_func(dataset.model_path, "train", scene.loaded_iter,
-                        scene.getTrainCameras(), gaussians, pipeline,
-                        background, deform)
+                        scene.getTrainCameras(), gaussians, pipeline, background, deform, fine_deform, no_mlp)
 
         if not skip_test:
             render_func(dataset.model_path, "test", scene.loaded_iter,
-                        scene.getTestCameras(), gaussians, pipeline,
-                        background, deform)
+                        scene.getTestCameras(), gaussians, pipeline, background, deform, fine_deform, no_mlp)
 
 
 if __name__ == "__main__":
@@ -328,10 +394,12 @@ if __name__ == "__main__":
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--mode", default='render', choices=['render', 'time', 'view', 'all', 'pose', 'original'])
+    parser.add_argument('--no-mlp', action='store_true')
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.mode)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args),
+                args.skip_train, args.skip_test, args.mode, args.no_mlp)

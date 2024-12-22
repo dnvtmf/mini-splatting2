@@ -10,10 +10,11 @@
 #
 
 import os
+from typing import Sequence, Union, Dict
 
 import torch
 import numpy as np
-from torch import nn
+from torch import nn, Tensor
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2  # noqa
 
@@ -329,7 +330,7 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
-    def prune_points(self, mask):
+    def prune_points(self, mask, deform_net=None):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
@@ -347,6 +348,8 @@ class GaussianModel:
 
         self._culling = self._culling[valid_points_mask]
         self.factor_culling = self.factor_culling[valid_points_mask]
+        if deform_net is not None:
+            deform_net.prune_points(mask)
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -394,19 +397,19 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, deform_net=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(grads, max_grad, extent, deform_net=deform_net)
+        self.densify_and_split(grads, max_grad, extent, deform_net=deform_net)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
+        self.prune_points(prune_mask, deform_net=deform_net)
 
         torch.cuda.empty_cache()
 
@@ -421,12 +424,11 @@ class GaussianModel:
             update_filter])
         self.denom[update_filter] += 1
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, deform_net=None):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling,
-                                                        dim=1).values <= self.percent_dense * scene_extent)
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask, torch.max(self.get_scaling, dim=1).values <= self.percent_dense * scene_extent)
 
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -441,8 +443,10 @@ class GaussianModel:
         self._culling = torch.cat((self._culling, new_culling))
         new_factor_culling = self.factor_culling[selected_pts_mask]
         self.factor_culling = torch.cat((self.factor_culling, new_factor_culling))
+        if deform_net is not None:
+            deform_net.clone_points(selected_pts_mask)
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, deform_net=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -463,6 +467,8 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        if deform_net is not None:
+            deform_net.split_points(selected_pts_mask, N=N)
 
         new_culling = self._culling[selected_pts_mask].repeat(N, 1)
         self._culling = torch.cat((self._culling, new_culling))
@@ -471,25 +477,25 @@ class GaussianModel:
 
         prune_filter = torch.cat(
             (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
-        self.prune_points(prune_filter)
+        self.prune_points(prune_filter, deform_net=deform_net)
 
-    def densify_and_prune_mask(self, max_grad, min_opacity, extent, max_screen_size, mask_split):
+    def densify_and_prune_mask(self, max_grad, min_opacity, extent, max_screen_size, mask_split, deform_net=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split_mask(grads, max_grad, extent, mask_split)
+        self.densify_and_clone(grads, max_grad, extent, deform_net=deform_net)
+        self.densify_and_split_mask(grads, max_grad, extent, mask_split, deform_net=deform_net)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
+        self.prune_points(prune_mask, deform_net=deform_net)
 
         torch.cuda.empty_cache()
 
-    def densify_and_split_mask(self, grads, grad_threshold, scene_extent, mask, N=2):
+    def densify_and_split_mask(self, grads, grad_threshold, scene_extent, mask, N=2, deform_net=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points,), device="cuda")
@@ -515,6 +521,8 @@ class GaussianModel:
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        if deform_net is not None:
+            deform_net.split_points(selected_pts_mask, N=N)
 
         new_culling = self._culling[selected_pts_mask].repeat(N, 1)
         self._culling = torch.cat((self._culling, new_culling))
@@ -523,7 +531,7 @@ class GaussianModel:
 
         prune_filter = torch.cat(
             (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
-        self.prune_points(prune_filter)
+        self.prune_points(prune_filter, deform_net=deform_net)
 
     def reinitial_pts(self, pts, rgb):
 
@@ -940,3 +948,52 @@ class GaussianModel:
     def extend_features_rest(self):
         features = torch.zeros((self._xyz.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         self._features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+
+
+def change_optimizer(
+    optimizers: Union[torch.optim.Optimizer, Sequence[torch.optim.Optimizer]],
+    tensor: Union[Tensor, Dict[str, Tensor]],
+    name: Union[None, str, Sequence[str]] = None, op='replace'
+) -> Dict[str, Tensor]:
+    """replace, prune, concat a tensor or tensor list in optimizer"""
+    assert op in ['replace', 'prune', 'concat']
+    optimizable_tensors = {}
+    mask = None
+    if name is not None:
+        op_names = [name] if isinstance(name, str) else list(name)
+    else:
+        assert isinstance(tensor, dict)
+        op_names = list(tensor.keys())
+    if isinstance(optimizers, torch.optim.Optimizer):
+        optimizers = [optimizers]
+    for optimizer in optimizers:
+        for group in optimizer.param_groups:
+            if ('name' not in group) or group['name'] not in op_names:
+                continue
+            old_tensor = group['params'][0]
+            new_tensor = tensor if isinstance(tensor, Tensor) else tensor[group['name']]
+            if op == 'concat':
+                group["params"][0] = nn.Parameter(torch.cat([old_tensor, new_tensor]).requires_grad_(True))
+            elif op == 'prune':
+                mask = new_tensor
+                group["params"][0] = nn.Parameter(old_tensor[mask].requires_grad_(True))
+            else:
+                group["params"][0] = nn.Parameter(new_tensor.requires_grad_(True))
+            optimizable_tensors[group["name"]] = group["params"][0]
+
+            stored_state = optimizer.state.get(old_tensor, None)
+            if stored_state is None:
+                continue
+            del optimizer.state[old_tensor]
+            if op == 'concat':
+                stored_state["exp_avg"] = torch.cat([stored_state["exp_avg"], torch.zeros_like(new_tensor)], dim=0)
+                stored_state["exp_avg_sq"] = torch.cat(
+                    [stored_state["exp_avg_sq"], torch.zeros_like(new_tensor)], dim=0)
+            elif op == 'prune':
+                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
+                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+            else:  # replace
+                stored_state["exp_avg"] = torch.zeros_like(new_tensor)
+                stored_state["exp_avg_sq"] = torch.zeros_like(new_tensor)
+            optimizer.state[group['params'][0]] = stored_state
+    return optimizable_tensors

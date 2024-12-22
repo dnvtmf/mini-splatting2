@@ -18,11 +18,10 @@ sys.path.append(os.path.abspath(os.path.join(BASE_DIR, '..')))
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, network_gui
+from gaussian_renderer import render
 import sys
 from scene import Scene, GaussianModel
-
-from scene.deform_model import DeformModel
+from scene.sp_gs import DeformModel
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
 from tqdm import tqdm
@@ -41,12 +40,17 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations):
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    deform = DeformModel(dataset.is_blender)
-    deform.train_setting(opt)
 
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt, use_adam=True)
     gaussians.init_culling(len(scene.getTrainCameras()))
+
+    train_cameras = scene.getTrainCameras()
+    train_times = torch.tensor([cam.fid for cam in train_cameras]).cuda()
+    train_times = torch.unique(train_times)
+    print(f'There are {len(train_times)} frames')
+    deform = DeformModel(num_points=gaussians._xyz.shape[0], train_times=train_times, num_superpoints=300)
+    deform.train_setting(opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -81,11 +85,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             d_xyz, d_rotation, d_scaling = 0.0, 0.0, 0.0
         else:
             N = gaussians.get_xyz.shape[0]
-            time_input = fid.unsqueeze(0).expand(N, -1)
-
-            ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(
-                N - 1) * time_interval * smooth_term(iteration)
-            d_xyz, d_rotation, d_scaling = deform.step(gaussians.get_xyz.detach(), time_input + ast_noise)
+            time_input = fid.unsqueeze(0).expand(1, -1)
+            # ast_noise = 0 if dataset.is_blender else torch.randn(1, 1, device='cuda').expand(
+            #     N - 1) * time_interval * smooth_term(iteration)
+            ast_noise = 0
+            d_xyz, d_rotation, d_scaling = deform.step(gaussians.get_xyz.detach(), time_input + ast_noise)[0]
 
         # Render
         render_pkg_re = render(viewpoint_cam, gaussians, pipe, background,
@@ -106,7 +110,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.set_postfix({
+                    "Loss": f"{ema_loss_for_log:.{7}f}",
+                    'num': f"{gaussians.get_xyz.size()[0]:.2e}"
+                })
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -134,7 +141,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold,
+                                                deform_net=deform)
 
                 if iteration % opt.opacity_reset_interval == 0 or (
                     dataset.white_background and iteration == opt.densify_from_iter):
@@ -198,8 +206,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 for idx, viewpoint in enumerate(config['cameras']):
                     fid = viewpoint.fid
                     xyz = scene.gaussians.get_xyz
-                    time_input = fid.unsqueeze(0).expand(xyz.shape[0], -1)
-                    d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)
+                    time_input = fid.unsqueeze(0)  # .expand(xyz.shape[0], -1)
+                    d_xyz, d_rotation, d_scaling = deform.step(xyz.detach(), time_input)[0]
                     image = torch.clamp(
                         renderFunc(viewpoint, scene.gaussians, *renderArgs, d_xyz=d_xyz, d_rotation=d_rotation,
                                    d_scaling=d_scaling)[

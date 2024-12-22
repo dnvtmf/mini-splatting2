@@ -21,7 +21,8 @@ from utils.loss_utils import l1_loss, ssim
 from fused_ssim import fused_ssim
 from gaussian_renderer import render, render_imp, render_simp, render_depth
 import sys
-from scene import Scene, GaussianModel, DeformModel
+from scene import Scene, GaussianModel
+from scene.deform_model import DeformModel
 from utils.general_utils import safe_state, get_linear_noise_func
 import uuid
 from tqdm import tqdm
